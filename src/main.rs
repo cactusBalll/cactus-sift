@@ -1,6 +1,5 @@
 use clap::Parser;
 use image::ImageReader;
-mod sift;
 /// Simple SIFT algorithm implementation
 #[derive(Parser, Debug)]
 struct Args {

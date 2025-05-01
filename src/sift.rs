@@ -1,3 +1,5 @@
+mod gaussian_cuda;
+
 use image::{
     GrayImage, ImageBuffer, Luma, Rgb, RgbImage,
     buffer::ConvertBuffer,
@@ -42,7 +44,7 @@ pub struct DoGAndKPComputed {
     pub keypoints: Vec<SIFTKeyPoint>,
 }
 
-struct SIFTKeyPoint {
+pub struct SIFTKeyPoint {
     pub x: u32,
     pub y: u32,
     pub size: f32,
@@ -148,10 +150,12 @@ fn calculate_dog(img: &LumaF32Image) -> DoGComputed {
         imageops::FilterType::Triangle,
     );
     let sigma_init = (SIGMA_INV1.powi(2) - SIGMA_IN.powi(2)).sqrt();
-    let seed_img = imageops::blur(&img_2x, sigma_init as f32);
+    let seed_img = imageops::fast_blur(&img_2x, sigma_init as f32);
     // 用图片最小方向计算octaves数量，它由图片尺度决定，后面减的常数可以任意设定
     let min_axis = seed_img.width().min(seed_img.height());
     let n_octaves = ((min_axis as f32).log2() - 2.0).round() as usize;
+    // dbg!(min_axis);
+    // dbg!(n_octaves);
 
     // 构建高斯模糊塔
     // scale间的比例
@@ -170,7 +174,9 @@ fn calculate_dog(img: &LumaF32Image) -> DoGComputed {
         imgs.push(initial);
         sigmas.iter().skip(1).for_each(|sigma| {
             let prev = imgs.last().unwrap();
-            imgs.push(imageops::blur(prev, *sigma as f32));
+            // let nxt_scale = imageops::fast_blur(prev, *sigma as f32);
+            let nxt_scale = gaussian_cuda::blur(prev, *sigma as f32);
+            imgs.push(nxt_scale);
         });
         imgs
     };
@@ -181,6 +187,7 @@ fn calculate_dog(img: &LumaF32Image) -> DoGComputed {
         // 每一个octave的第一个scale从上一层得到，最后还有额外2个scale，所以 +3
         let last_octave = &pyr_g.last().unwrap();
         let initial = &last_octave[last_octave.len() - 3];
+        // dbg!(initial.width());
         let scaled_half =
             imageops::resize(initial, initial.width() / 2, initial.height() / 2, Triangle);
         pyr_g.push(create_octave(scaled_half));
@@ -685,7 +692,7 @@ mod test {
     use image::{
         GrayImage, ImageBuffer, ImageReader, Rgb, RgbImage, buffer::ConvertBuffer, imageops,
     };
-    use imageproc::{drawing::draw_antialiased_line_segment_mut, pixelops};
+    use imageproc::{drawing::{draw_antialiased_line_segment_mut, draw_hollow_circle_mut}, pixelops};
 
     use super::{
         LumaF32Image, SCALES_PER_OCTAVE, calculate_dog, calculate_feature,
@@ -695,10 +702,11 @@ mod test {
 
     #[test]
     fn step1() {
-        let image = ImageReader::open("./res/img0.jpg")
+        let image = ImageReader::open("./res/arch.jpeg")
             .unwrap()
             .decode()
             .unwrap();
+        let image = image.resize(image.width() / 4, image.height() / 4, imageops::FilterType::Triangle);
         let image = image.to_luma32f();
         let dog = calculate_dog(&image);
 
@@ -735,11 +743,11 @@ mod test {
         }
         let dog_view: GrayImage = dog_view.convert();
         g_view
-            .save_with_format("./gaussian_tower.jpg", image::ImageFormat::Jpeg)
+            .save_with_format("./gaussian_tower_cuda.jpg", image::ImageFormat::Jpeg)
             .unwrap();
-        dog_view
-            .save_with_format("./dog_tower.jpg", image::ImageFormat::Jpeg)
-            .unwrap();
+        // dog_view
+        //     .save_with_format("./dog_tower.jpg", image::ImageFormat::Jpeg)
+        //     .unwrap();
     }
     #[test]
     fn step2() {
@@ -811,8 +819,8 @@ mod test {
     }
 
     #[test]
-    fn step4() {
-        let image = ImageReader::open("./res/usb1.jpg")
+    fn step4_0() {
+        let image = ImageReader::open("./res/arch.jpeg")
             .unwrap()
             .decode()
             .unwrap();
@@ -844,7 +852,7 @@ mod test {
             image_ref.width() as i64,
             image_ref.height() as i64,
         );
-        for pp in point_pairs.iter().step_by(16) {
+        for pp in point_pairs.iter(){
             draw_antialiased_line_segment_mut(
                 &mut result,
                 (pp.x1 as i32, pp.y1 as i32),
@@ -857,7 +865,7 @@ mod test {
             );
         }
         result
-            .save_with_format("match4_1.jpg", image::ImageFormat::Jpeg)
+            .save_with_format("match_arch.jpg", image::ImageFormat::Jpeg)
             .unwrap();
     }
     #[test]
@@ -891,6 +899,29 @@ mod test {
         let result = draw_match(&image1_ref, &image2_ref, &point_pairs);
         result
             .save_with_format("match4.jpg", image::ImageFormat::Jpeg)
+            .unwrap();
+    }
+
+    #[test]
+    fn step4_2() {
+        let image = ImageReader::open("./res/arch.jpeg")
+            .unwrap()
+            .decode()
+            .unwrap();
+        let image1 = image.to_luma32f();
+        let kpdog = sift(&image1);
+
+        let mut image = image.to_rgb8();
+
+        for kpt in kpdog.keypoints.iter() {
+            let x = kpt.x as i32;
+            let y = kpt.y as i32;
+            let scale = 2_f32.powi(kpt.octave as i32 - 1);
+            draw_hollow_circle_mut(&mut image, (x,y), (kpt.size * scale) as i32, Rgb([255,0,0]));
+            
+        }
+        image
+            .save_with_format("arch_kpt_cuda.jpg", image::ImageFormat::Jpeg)
             .unwrap();
     }
 }
